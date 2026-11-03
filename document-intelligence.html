@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocuLens – Document Intelligence & Workflow Automation</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<style>
+:root{--bg:#f3f5f4;--panel:#fff;--ink:#14231f;--mute:#5d6b66;--line:#d5dcd9;--acc:#0f6b57;--acc2:#e8f3ef;--bad:#b3261e;--ok:#17734a;--warn:#9a6700}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1715;--panel:#17211e;--ink:#e6efeb;--mute:#93a39d;--line:#2a3833;--acc:#4cc4a6;--acc2:#1d2f2a;--bad:#ff8a80;--ok:#6fdc9f;--warn:#f0c05a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 "Segoe UI",system-ui,sans-serif}
+header{padding:22px 28px;border-bottom:1px solid var(--line);background:var(--panel)}
+h1{margin:0;font:700 24px Georgia,serif}
+header p{margin:4px 0 0;color:var(--mute)}
+main{display:grid;grid-template-columns:340px 1fr;gap:20px;padding:20px 28px;max-width:1300px;margin:auto}
+@media(max-width:900px){main{grid-template-columns:1fr;padding:14px}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
+h2{font:600 16px Georgia,serif;margin:0 0 10px}
+.drop{border:2px dashed var(--line);border-radius:8px;padding:22px;text-align:center;cursor:pointer;color:var(--mute)}
+.drop:hover,.drop.on{border-color:var(--acc);background:var(--acc2)}
+button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:8px 14px;font:inherit;cursor:pointer}
+@media(prefers-color-scheme:dark){button{color:#0f1715}}
+button.ghost{background:transparent;color:var(--acc);border:1px solid var(--acc)}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+textarea,input[type=text]{width:100%;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:6px;padding:8px;font:inherit}
+.doc{padding:9px 10px;border:1px solid var(--line);border-radius:6px;margin-bottom:8px;cursor:pointer}
+.doc.sel{border-color:var(--acc);background:var(--acc2)}
+.doc small{color:var(--mute);display:block}
+.tag{display:inline-block;padding:1px 9px;border-radius:99px;background:var(--acc2);color:var(--acc);font-size:13px;font-weight:600}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.stat{border:1px solid var(--line);border-radius:6px;padding:10px}
+.stat b{display:block;font-size:22px}
+.stat span{color:var(--mute);font-size:13px}
+table{width:100%;border-collapse:collapse}
+td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}
+.ok{color:var(--ok)}.miss{color:var(--bad)}.warn{color:var(--warn)}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px;overflow:auto;font-size:13px;max-height:320px}
+.row{display:flex;gap:8px}
+.bar{height:8px;background:var(--acc);border-radius:4px}
+.empty{color:var(--mute)}
+</style>
+</head>
+<body>
+<header>
+  <h1>DocuLens</h1>
+  <p>Upload PDF, DOCX or TXT files. Extract fields, classify, summarize, validate, and ask questions about each document.</p>
+</header>
+<main>
+  <aside>
+    <div class="card">
+      <h2>Upload documents</h2>
+      <div class="drop" id="drop" tabindex="0">Drop files here or click to choose<br><small>PDF · DOCX · TXT</small></div>
+      <input type="file" id="file" accept=".pdf,.docx,.txt" multiple hidden>
+      <p class="row" style="margin:10px 0 0"><button class="ghost" id="sample">Load sample invoice</button></p>
+    </div>
+    <div class="card"><h2>Documents</h2><div id="list" class="empty">No documents yet.</div></div>
+  </aside>
+  <section>
+    <div class="card"><h2>Dashboard</h2><div class="stats" id="stats"></div><div id="chart" style="margin-top:14px"></div></div>
+    <div id="detail" class="card empty">Select or upload a document to see results.</div>
+  </section>
+</main>
+
+<script>
+if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// ---------- Document types: keywords + required fields ----------
+const TYPES={
+  Invoice:{kw:['invoice','amount due','bill to','subtotal','tax','payment terms','total'],req:['invoiceNumber','date','totalAmount','email']},
+  Resume:{kw:['experience','education','skills','projects','internship','objective','university'],req:['email','phone','skills']},
+  Contract:{kw:['agreement','party','terms','hereby','liability','termination','governing law','clause'],req:['date','parties']},
+  'Purchase Order':{kw:['purchase order','po number','ship to','quantity','unit price','vendor'],req:['poNumber','date','totalAmount']},
+  Report:{kw:['report','summary','findings','analysis','conclusion','results','methodology'],req:['date']}
+};
+const STOP=new Set('the a an and or of to in on for with is are was were be by at as from that this it its you your we our not have has had will can may shall which'.split(' '));
+const docs=[];let selected=-1;
+
+// ---------- Text extraction ----------
+async function readFile(f){
+  const ext=f.name.split('.').pop().toLowerCase();
+  if(ext==='txt') return await f.text();
+  if(ext==='docx'){const r=await mammoth.extractRawText({arrayBuffer:await f.arrayBuffer()});return r.value}
+  if(ext==='pdf'){
+    const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;let t='';
+    for(let i=1;i<=pdf.numPages;i++){const p=await pdf.getPage(i);const c=await p.getTextContent();t+=c.items.map(x=>x.str).join(' ')+'\n'}
+    return t;
+  }
+  throw new Error('Unsupported file type');
+}
+
+// ---------- NLP helpers ----------
+const words=s=>(s.toLowerCase().match(/[a-z0-9']+/g)||[]).filter(w=>!STOP.has(w)&&w.length>2);
+const sentences=t=>(t.replace(/\s+/g,' ').match(/[^.!?\n]+[.!?]?/g)||[]).map(s=>s.trim()).filter(s=>s.length>25);
+
+function classify(text){
+  const low=text.toLowerCase();const scores={};
+  for(const [k,v] of Object.entries(TYPES)) scores[k]=v.kw.reduce((a,w)=>a+(low.includes(w)?1:0),0)/v.kw.length;
+  const best=Object.entries(scores).sort((a,b)=>b[1]-a[1])[0];
+  return best[1]>0.15?{type:best[0],confidence:Math.min(0.99,best[1]+0.2)}:{type:'Other',confidence:0.3};
+}
+
+function extract(text){
+  const m=(re,i=1)=>{const r=text.match(re);return r?r[i].trim():null};
+  const amounts=[...text.matchAll(/(?:total|amount due|grand total)[^\d$₹€£]{0,25}([$₹€£]?\s?[\d,]+(?:\.\d{2})?)/gi)].map(x=>x[1]);
+  const skillsLine=m(/skills?\s*[:\-]\s*([^\n]{5,200})/i);
+  const parties=[...text.matchAll(/between\s+([A-Z][\w&.\s]{2,40}?)\s+and\s+([A-Z][\w&.\s]{2,40}?)[,.(]/g)][0];
+  return{
+    invoiceNumber:m(/invoice\s*(?:no\.?|number|#)\s*[:\-]?\s*([A-Z0-9\-\/]+)/i),
+    poNumber:m(/(?:po|purchase order)\s*(?:no\.?|number|#)\s*[:\-]?\s*([A-Z0-9\-\/]+)/i),
+    date:m(/(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}|\d{4}-\d{2}-\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})/i),
+    totalAmount:amounts.length?amounts[amounts.length-1]:null,
+    email:m(/([\w.+-]+@[\w-]+\.[\w.-]+)/),
+    phone:m(/(\+?\d[\d\s\-()]{8,14}\d)/),
+    parties:parties?[parties[1].trim(),parties[2].trim()]:null,
+    skills:skillsLine?skillsLine.split(/[,;|]/).map(s=>s.trim()).filter(Boolean):null
+  };
+}
+
+function summarize(text,n=3){
+  const ss=sentences(text);if(!ss.length) return 'Not enough text to summarize.';
+  const freq={};words(text).forEach(w=>freq[w]=(freq[w]||0)+1);
+  const scored=ss.map((s,i)=>({s,i,sc:words(s).reduce((a,w)=>a+(freq[w]||0),0)/Math.sqrt(words(s).length+1)}));
+  return scored.sort((a,b)=>b.sc-a.sc).slice(0,n).sort((a,b)=>a.i-b.i).map(x=>x.s).join(' ');
+}
+
+function validate(type,fields){
+  const req=(TYPES[type]||{req:[]}).req;
+  const missing=req.filter(k=>!fields[k]||(Array.isArray(fields[k])&&!fields[k].length));
+  const issues=[];
+  if(fields.email&&!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(fields.email)) issues.push('Email format looks invalid');
+  return{required:req,missing,issues,valid:!missing.length&&!issues.length};
+}
+
+// Question answering: TF-IDF style sentence retrieval over document text
+function answer(text,q){
+  const ss=sentences(text);const qw=words(q);if(!qw.length||!ss.length) return 'Ask a more specific question.';
+  const df={};ss.forEach(s=>new Set(words(s)).forEach(w=>df[w]=(df[w]||0)+1));
+  const scored=ss.map(s=>{const ws=new Set(words(s));
+    return{s,sc:qw.reduce((a,w)=>a+(ws.has(w)?Math.log(1+ss.length/(df[w]||1)):0),0)}}).sort((a,b)=>b.sc-a.sc);
+  if(scored[0].sc===0) return 'No relevant passage found in this document.';
+  return scored.slice(0,2).filter(x=>x.sc>0).map(x=>x.s).join(' ');
+}
+
+// ---------- Pipeline ----------
+function process(name,text){
+  const c=classify(text);const fields=extract(text);const v=validate(c.type,fields);
+  const d={name,text,type:c.type,confidence:c.confidence,fields,summary:summarize(text),validation:v,
+    wordCount:text.split(/\s+/).filter(Boolean).length,time:new Date().toLocaleTimeString()};
+  docs.push(d);selected=docs.length-1;render();
+}
+async function handleFiles(files){
+  for(const f of files){try{const t=await readFile(f);
+    if(t.trim().length<10) throw new Error('No readable text (scanned PDF?)');process(f.name,t)}
+    catch(e){alert(f.name+': '+e.message)}}
+}
+
+// ---------- UI ----------
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+$('drop').onclick=()=>$('file').click();
+$('drop').onkeydown=e=>{if(e.key==='Enter'||e.key===' ')$('file').click()};
+$('file').onchange=e=>handleFiles(e.target.files);
+$('drop').ondragover=e=>{e.preventDefault();$('drop').classList.add('on')};
+$('drop').ondragleave=()=>$('drop').classList.remove('on');
+$('drop').ondrop=e=>{e.preventDefault();$('drop').classList.remove('on');handleFiles(e.dataTransfer.files)};
+$('sample').onclick=()=>process('sample-invoice.txt',`INVOICE
+Invoice No: INV-2026-0142
+Date: 03/11/2026
+Bill To: Procure Yards Pvt Ltd
+Contact: accounts@procureyards.example  Phone: +91 98765 43210
+Payment terms: Net 30 days. Payment is due within thirty days of the invoice date.
+Item: Cloud hosting services, quantity 3 months, unit price 12,000.
+Subtotal: 36,000.00
+Tax (18%): 6,480.00
+Total Amount Due: 42,480.00
+Late payments may incur an interest charge of 2 percent per month. Please remit payment to the bank account listed below.`);
+
+function render(){
+  $('list').innerHTML=docs.length?docs.map((d,i)=>`<div class="doc ${i===selected?'sel':''}" data-i="${i}"><b>${esc(d.name)}</b><small>${d.type} · ${d.validation.valid?'valid':'needs review'}</small></div>`).join(''):'No documents yet.';
+  document.querySelectorAll('.doc').forEach(el=>el.onclick=()=>{selected=+el.dataset.i;render()});
+  const n=docs.length,ok=docs.filter(d=>d.validation.valid).length;
+  const miss=docs.reduce((a,d)=>a+d.validation.missing.length,0);
+  const words=docs.reduce((a,d)=>a+d.wordCount,0);
+  $('stats').innerHTML=[['Documents',n],['Valid',ok],['Missing fields',miss],['Words read',words]].map(([l,v])=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
+  const counts={};docs.forEach(d=>counts[d.type]=(counts[d.type]||0)+1);
+  $('chart').innerHTML=n?Object.entries(counts).map(([k,v])=>`<div style="display:flex;align-items:center;gap:10px;margin:4px 0"><span style="width:120px">${k}</span><div class="bar" style="width:${v/n*60}%"></div><span>${v}</span></div>`).join(''):'<span class="empty">Type breakdown appears after your first upload.</span>';
+  const d=docs[selected];const det=$('detail');
+  if(!d){det.className='card empty';det.textContent='Select or upload a document to see results.';return}
+  det.className='card';
+  const json={documentType:d.type,confidence:+d.confidence.toFixed(2),fields:Object.fromEntries(Object.entries(d.fields).filter(([,v])=>v)),validation:{valid:d.validation.valid,missingFields:d.validation.missing,issues:d.validation.issues}};
+  det.innerHTML=`<h2>${esc(d.name)} <span class="tag">${d.type}</span> <small class="empty">${Math.round(d.confidence*100)}% confidence</small></h2>
+  <h2 style="margin-top:14px">Summary</h2><p>${esc(d.summary)}</p>
+  <h2>Validation</h2><table>${d.validation.required.map(k=>`<tr><td>${k}</td><td class="${d.validation.missing.includes(k)?'miss':'ok'}">${d.validation.missing.includes(k)?'Missing':'Found: '+esc(Array.isArray(d.fields[k])?d.fields[k].join(', '):d.fields[k])}</td></tr>`).join('')||'<tr><td>No required fields defined for this type.</td></tr>'}${d.validation.issues.map(i=>`<tr><td class="warn" colspan="2">${esc(i)}</td></tr>`).join('')}</table>
+  <h2 style="margin-top:14px">Ask this document</h2>
+  <div class="row"><input type="text" id="q" placeholder="e.g. What are the payment terms?"><button id="ask">Ask</button></div>
+  <p id="ans" class="empty" style="margin:8px 0 0"></p>
+  <h2 style="margin-top:14px">Structured JSON output</h2><pre id="json">${esc(JSON.stringify(json,null,2))}</pre>
+  <div class="row"><button class="ghost" id="copy">Copy JSON</button><button class="ghost" id="dl">Download JSON</button></div>`;
+  const ask=()=>{$('ans').className='';$('ans').textContent=answer(d.text,$('q').value)};
+  $('ask').onclick=ask;$('q').onkeydown=e=>{if(e.key==='Enter')ask()};
+  $('copy').onclick=()=>navigator.clipboard.writeText(JSON.stringify(json,null,2));
+  $('dl').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(json,null,2)],{type:'application/json'}));a.download=d.name+'.json';a.click()};
+}
+render();
+</script>
+</body>
+</html>

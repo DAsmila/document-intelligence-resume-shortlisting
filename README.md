@@ -48,6 +48,3 @@ A browser-based tool that reads documents, extracts structured information from 
 - LLM-based summarization and question answering
 - OCR for scanned documents
 
-## Author
-
-Asmila D, [GitHub](https://github.com/DAsmila) · [LinkedIn](https://www.linkedin.com/in/asmila-d)
